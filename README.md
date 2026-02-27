@@ -1,3 +1,5 @@
+博文地址: https://blog.nightytech.com/n-pointer/
+
 # N-Pointer (All-in-One 手势鼠标)
 
 这是一个基于 MediaPipe 和 PyQt6 开发的单手全能手势识别鼠标控制系统。
