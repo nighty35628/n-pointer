@@ -636,7 +636,7 @@ class ControlWindow(QMainWindow):
         self.gesture_card_r.setMinimumHeight(140) # Fixed height for stability
         self.layout_r = QVBoxLayout(self.gesture_card_r)
         self.layout_r.addWidget(QLabel("主控手状态").setObjectName("sectionTitle"))
-        self.gesture_label_r = QLabel("等待识别...")
+        self.gesture_label_r = QLabel("等待识别")
         self.gesture_label_r.setObjectName("gestureDisplay")
         self.gesture_label_r.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.layout_r.addWidget(self.gesture_label_r)
