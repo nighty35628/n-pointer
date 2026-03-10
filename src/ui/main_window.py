@@ -7,6 +7,7 @@ from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QBoxLayout,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QFrame,
@@ -25,6 +26,19 @@ from PyQt6.QtWidgets import (
 
 from src.core.tracker import HandTrackerThread
 from src.utils.config import load_settings, save_settings
+
+
+class NoWheelComboBox(QComboBox):
+    """QComboBox variant that ignores mouse wheel events to avoid accidental changes."""
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelSlider(QSlider):
+    """QSlider variant that ignores mouse wheel events to avoid accidental changes."""
+    def wheelEvent(self, event):
+        event.ignore()
+
 
 SIDEBAR_WIDE = 210
 SIDEBAR_NARROW = 70
@@ -65,6 +79,7 @@ I18N = {
         "thumb_index": "拇指 + 食指",
         "thumb_middle": "拇指 + 中指",
         "perf": "性能参数",
+        "perf_lock": "锁定",
         "move_i": "移动间隔 (ms)",
         "scroll_i": "滚动间隔 (ms)",
         "scroll_d": "滚动死区",
@@ -79,12 +94,12 @@ I18N = {
         "left": "左手",
         "lang_zh": "中文",
         "lang_en": "English",
-        "g_ld": "左键拖动",
-        "g_rc": "右键点击",
+        "g_ld": "左键",
+        "g_rc": "右键",
         "g_none": "无动作",
         "st_wait": "等待识别",
-        "st_ld": "左键拖动",
-        "st_rc": "右键点击",
+        "st_ld": "左键",
+        "st_rc": "右键",
         "st_model": "模型不可用",
         "st_cam": "摄像头不可用",
         "st_show": "显示桌面",
@@ -127,6 +142,7 @@ I18N = {
         "thumb_index": "Thumb + index",
         "thumb_middle": "Thumb + middle",
         "perf": "Performance",
+        "perf_lock": "Lock",
         "move_i": "Move interval (ms)",
         "scroll_i": "Scroll interval (ms)",
         "scroll_d": "Scroll deadzone",
@@ -214,7 +230,7 @@ class ControlWindow(QMainWindow):
         self.settings = load_settings()
         self.language = self.settings.get("language", "zh") if self.settings.get("language") in ("zh", "en") else "zh"
         self.theme_name = self.settings.get("theme", "light") if self.settings.get("theme") in THEMES else "light"
-        self.sidebar_expanded = True  # 初始设为展开
+        self.sidebar_expanded = True
         self.compact_mode = False
         self.is_loading_ui = True
         self.tracker = None
@@ -235,9 +251,6 @@ class ControlWindow(QMainWindow):
         self.apply_preferences()
         self._apply_responsive(animate=False)
         self._show_default_preview()
-        
-        # 启动 500ms 后自动收起侧栏
-        QTimer.singleShot(500, lambda: self._set_sidebar_expanded(False, animate=True))
 
     def _t(self, key):
         return I18N[self.language][key]
@@ -262,9 +275,9 @@ class ControlWindow(QMainWindow):
         root_layout.addWidget(self.main_container)
 
         self.sidebar = QFrame(objectName="sidebar")
-        self.sidebar.setProperty("collapsed", "true")
-        self.sidebar.setMinimumWidth(SIDEBAR_NARROW)
-        self.sidebar.setMaximumWidth(SIDEBAR_NARROW)
+        self.sidebar.setProperty("collapsed", "false")
+        self.sidebar.setMinimumWidth(SIDEBAR_WIDE)
+        self.sidebar.setMaximumWidth(SIDEBAR_WIDE)
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(0, 6, 0, 8)
         sidebar_layout.setSpacing(2)
@@ -309,7 +322,7 @@ class ControlWindow(QMainWindow):
 
         self.content = QFrame(objectName="contentArea")
         content_layout = QVBoxLayout(self.content)
-        content_layout.setContentsMargins(12, 12, 12, 12)
+        content_layout.setContentsMargins(24, 12, 24, 12)
         content_layout.setSpacing(0)
         self.pages = QStackedWidget(objectName="stackedPages")
         self._init_home_page()
@@ -376,9 +389,9 @@ class ControlWindow(QMainWindow):
         self.side_panel_layout.setContentsMargins(0, 0, 0, 0)
         self.side_panel_layout.setSpacing(8)
 
-        self.control_card = QFrame(objectName="statusCard")
+        self.control_card = QFrame(objectName="controlCard")
         control_layout = QVBoxLayout(self.control_card)
-        control_layout.setContentsMargins(8, 8, 8, 8)
+        control_layout.setContentsMargins(8, 0, 8, 8)
         control_layout.setSpacing(6)
         control_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.control_label = QLabel(objectName="statusEyebrow")
@@ -390,9 +403,10 @@ class ControlWindow(QMainWindow):
         self.start_stop_btn.setChecked(False)
         self.start_stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.start_stop_btn.setFixedSize(120, 44)
+        control_layout.addStretch()
         control_layout.addWidget(self.control_label)
-        # description removed from layout by design (kept as attribute)
         control_layout.addWidget(self.start_stop_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        control_layout.addStretch()
 
         self.status_title_main, self.gesture_label_r, self.main_status_card = self._create_status_card()
         self.status_title_helper, self.gesture_label_l, self.helper_status_card = self._create_status_card()
@@ -467,6 +481,7 @@ class ControlWindow(QMainWindow):
         self.lang_group.addButton(self.lang_zh_rb, 0)
         self.lang_group.addButton(self.lang_en_rb, 1)
         lang_layout = QHBoxLayout()
+        lang_layout.setSpacing(12)
         lang_layout.addWidget(self.lang_zh_rb)
         lang_layout.addWidget(self.lang_en_rb)
         lang_layout.addStretch()
@@ -477,6 +492,7 @@ class ControlWindow(QMainWindow):
         self.theme_group.addButton(self.theme_light_rb, 0)
         self.theme_group.addButton(self.theme_dark_rb, 1)
         theme_layout = QHBoxLayout()
+        theme_layout.setSpacing(12)
         theme_layout.addWidget(self.theme_light_rb)
         theme_layout.addWidget(self.theme_dark_rb)
         theme_layout.addStretch()
@@ -487,17 +503,18 @@ class ControlWindow(QMainWindow):
         self.hand_group.addButton(self.hand_right_rb, 0)
         self.hand_group.addButton(self.hand_left_rb, 1)
         hand_layout = QHBoxLayout()
+        hand_layout.setSpacing(12)
         hand_layout.addWidget(self.hand_right_rb)
         hand_layout.addWidget(self.hand_left_rb)
         hand_layout.addStretch()
 
-        self.h_slider = QSlider(Qt.Orientation.Horizontal)
+        self.h_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.h_slider.setRange(5, 30)
-        self.v_slider = QSlider(Qt.Orientation.Horizontal)
+        self.v_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.v_slider.setRange(5, 30)
-        self.s_slider = QSlider(Qt.Orientation.Horizontal)
+        self.s_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.s_slider.setRange(2, 20)
-        self.t_slider = QSlider(Qt.Orientation.Horizontal)
+        self.t_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.t_slider.setRange(1, 100)
         self.h_label = QLabel()
         self.v_label = QLabel()
@@ -527,8 +544,8 @@ class ControlWindow(QMainWindow):
         bf.setContentsMargins(12, 12, 12, 12)
         bf.setHorizontalSpacing(16)
         bf.setVerticalSpacing(12)
-        self.thumb_index_combo = QComboBox()
-        self.thumb_middle_combo = QComboBox()
+        self.thumb_index_combo = NoWheelComboBox()
+        self.thumb_middle_combo = NoWheelComboBox()
         self.binding_title = QLabel(objectName="sectionTitle")
         self.row_thumb_index = QLabel()
         self.row_thumb_middle = QLabel()
@@ -543,13 +560,13 @@ class ControlWindow(QMainWindow):
         af.setContentsMargins(12, 12, 12, 12)
         af.setHorizontalSpacing(16)
         af.setVerticalSpacing(12)
-        self.move_interval_slider = QSlider(Qt.Orientation.Horizontal)
+        self.move_interval_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.move_interval_slider.setRange(8, 40)
-        self.scroll_interval_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scroll_interval_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.scroll_interval_slider.setRange(16, 80)
-        self.scroll_deadzone_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scroll_deadzone_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.scroll_deadzone_slider.setRange(6, 30)
-        self.scroll_scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scroll_scale_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.scroll_scale_slider.setRange(600, 3200)
         self.move_label = QLabel()
         self.scr_i_label = QLabel()
@@ -560,7 +577,9 @@ class ControlWindow(QMainWindow):
         self.row_scr_i = QLabel()
         self.row_scr_d = QLabel()
         self.row_scr_s = QLabel()
-        af.addRow(self.perf_title)
+        self.perf_lock_cb = QCheckBox()
+        self.perf_lock_cb.setChecked(True)
+        af.addRow(self.perf_title, self.perf_lock_cb)
         af.addRow(self.row_move, self._wrap_slider(self.move_interval_slider, self.move_label))
         af.addRow(self.row_scr_i, self._wrap_slider(self.scroll_interval_slider, self.scr_i_label))
         af.addRow(self.row_scr_d, self._wrap_slider(self.scroll_deadzone_slider, self.scr_d_label))
@@ -574,26 +593,12 @@ class ControlWindow(QMainWindow):
         self.hint_title = QLabel(objectName="sectionTitle")
         hl.addWidget(self.hint_title)
         self.hint_labels = []
-        for _ in range(4):
+        for _ in range(7):
             lb = QLabel(objectName="hintText")
             lb.setWordWrap(True)
             self.hint_labels.append(lb)
             hl.addWidget(lb)
         right.addWidget(self.hint_card)
-
-        self.note_card = QFrame(objectName="panelCard")
-        nl = QVBoxLayout(self.note_card)
-        nl.setContentsMargins(12, 12, 12, 12)
-        nl.setSpacing(8)
-        self.notes_title = QLabel(objectName="sectionTitle")
-        nl.addWidget(self.notes_title)
-        self.note_labels = []
-        for _ in range(3):
-            lb = QLabel(objectName="hintText")
-            lb.setWordWrap(True)
-            self.note_labels.append(lb)
-            nl.addWidget(lb)
-        right.addWidget(self.note_card)
         right.addStretch()
 
         self.settings_cards.addWidget(self.left_col, 3)
@@ -620,6 +625,7 @@ class ControlWindow(QMainWindow):
         self.toggle_btn.clicked.connect(lambda: self._set_sidebar_expanded(not self.sidebar_expanded, animate=True))
         self.start_stop_btn.clicked.connect(self._handle_power_click)
         self.lang_group.idClicked.connect(self._on_language_changed_rb)
+        self.perf_lock_cb.toggled.connect(self._toggle_perf_lock)
         self.theme_group.idClicked.connect(self._on_theme_changed_rb)
         self.hand_group.idClicked.connect(lambda: self.apply_preferences())
         for widget in [
@@ -654,6 +660,16 @@ class ControlWindow(QMainWindow):
             save_settings(self.settings)
             self.apply_style()
             self.apply_language()
+
+    def _toggle_perf_lock(self, locked):
+        widgets = [
+            self.move_interval_slider, self.scroll_interval_slider, 
+            self.scroll_deadzone_slider, self.scroll_scale_slider,
+            self.row_move, self.row_scr_i, self.row_scr_d, self.row_scr_s,
+            self.move_label, self.scr_i_label, self.scr_d_label, self.scr_s_label
+        ]
+        for w in widgets:
+            w.setEnabled(not locked)
 
     def _refresh_combo_labels(self):
         combos = [
@@ -715,6 +731,7 @@ class ControlWindow(QMainWindow):
         self.row_h.setText(self._t("h_sens"))
         self.row_v.setText(self._t("v_sens"))
         self.row_s.setText(self._t("smooth"))
+        self.perf_lock_cb.setText(self._t("perf_lock"))
         self.row_t.setText(self._t("lock"))
         self.binding_title.setText(self._t("binding"))
         self.row_thumb_index.setText(self._t("thumb_index"))
@@ -724,16 +741,15 @@ class ControlWindow(QMainWindow):
         self.row_scr_i.setText(self._t("scroll_i"))
         self.row_scr_d.setText(self._t("scroll_d"))
         self.row_scr_s.setText(self._t("scroll_s"))
-        self.notes_title.setText(self._t("notes"))
+        self.hint_title.setText(self._t("guide"))
         self.lang_zh_rb.setText(self._t("lang_zh"))
         self.lang_en_rb.setText(self._t("lang_en"))
         self.theme_light_rb.setText(self._t("theme_light"))
         self.theme_dark_rb.setText(self._t("theme_dark"))
         self.hand_right_rb.setText(self._t("right"))
         self.hand_left_rb.setText(self._t("left"))
-        for lb, key in zip(self.hint_labels, ["hint_1", "hint_2", "hint_3", "hint_4"]):
-            lb.setText(self._t(key))
-        for lb, key in zip(self.note_labels, ["n1", "n2", "n3"]):
+        all_hints = ["hint_1", "hint_2", "hint_3", "hint_4", "n1", "n2", "n3"]
+        for lb, key in zip(self.hint_labels, all_hints):
             lb.setText(self._t(key))
         self._refresh_combo_labels()
         self._update_sidebar_text()
@@ -796,6 +812,7 @@ class ControlWindow(QMainWindow):
         self.t_slider.setValue(int(self.settings["still_threshold"] * 10000))
         self.move_interval_slider.setValue(int(self.settings["move_interval_ms"]))
         self.scroll_interval_slider.setValue(int(self.settings["scroll_interval_ms"]))
+        self._toggle_perf_lock(self.perf_lock_cb.isChecked())
         self.scroll_deadzone_slider.setValue(int(self.settings["scroll_deadzone"] * 1000))
         self.scroll_scale_slider.setValue(int(self.settings["scroll_scale"]))
         self._set_combo(self.thumb_index_combo, self.settings["gesture_bindings"]["thumb_index"])
@@ -947,7 +964,6 @@ class ControlWindow(QMainWindow):
 
     def _apply_responsive(self, animate=True):
         compact = self.width() < RESPONSIVE_THRESHOLD
-        self._set_sidebar_expanded(not compact, animate=animate)
         self._set_compact_mode(compact)
         self._set_preview_pixmap(self.current_preview or self.default_preview)
 
@@ -974,8 +990,8 @@ class ControlWindow(QMainWindow):
             QFrame#sidebar {{
                 background: {theme['sidebar_bg']};
                 border-right: 1px solid {theme['border']};
-                border-top-left-radius: 24px;
-                border-bottom-left-radius: 24px;
+                border-top-left-radius: 0px;
+                border-bottom-left-radius: 0px;
             }}
             QFrame#contentArea, QStackedWidget#stackedPages, QScrollArea#settingsScroll, QWidget#settingsPage {{
                 background: transparent;
@@ -1045,7 +1061,12 @@ class ControlWindow(QMainWindow):
             QPushButton#powerButton:checked {{
                 background: #2fb36f;
             }}
-            QFrame#previewCard, QFrame#panelCard, QFrame#statusCard {{
+            QFrame#previewCard, QFrame#controlCard {{
+                background: transparent;
+                border: none;
+                border-radius: 0px;
+            }}
+            QFrame#panelCard, QFrame#statusCard {{
                 background: {theme['card_bg']};
                 border: 1px solid {theme['border']};
                 border-radius: 22px;
@@ -1093,17 +1114,30 @@ class ControlWindow(QMainWindow):
             }}
             QComboBox {{
                 background: {theme['input_bg']};
-                border: 1px solid {theme['border']};
+                border: 2px solid {theme['border']};
                 border-radius: 12px;
-                padding: 8px 12px;
-                min-height: 20px;
+                padding: 4px 12px;
+                min-height: 28px;
+                font-size: 14px;
             }}
             QComboBox:hover {{
                 border-color: {theme['accent']};
             }}
             QComboBox::drop-down {{
                 border: none;
-                width: 24px;
+                width: 30px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {theme['card_bg']};
+                border: 2px solid {theme['border']};
+                border-radius: 12px;
+                selection-background-color: {theme['accent_soft']};
+                selection-color: {theme['accent']};
+                outline: none;
+            }}
+            QComboBox QAbstractItemView::item {{
+                min-height: 32px;
+                padding-left: 10px;
             }}
             QRadioButton {{
                 spacing: 8px;
@@ -1119,6 +1153,35 @@ class ControlWindow(QMainWindow):
             QRadioButton::indicator:checked {{
                 border-color: {theme['accent']};
                 background: {theme['accent']};
+            }}
+            QCheckBox {{
+                spacing: 8px;
+                font-size: 14px;
+            }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                border: 2px solid {theme['border']};
+                background: {theme['input_bg']};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {theme['accent']};
+                border-color: {theme['accent']};
+                image: none;
+            }}
+            QCheckBox:disabled, QRadioButton:disabled, QSlider:disabled, QLabel:disabled {{
+                color: {theme['text_secondary']};
+                opacity: 0.5;
+            }}
+            QSlider::groove:horizontal:disabled {{
+                background: {theme['border']};
+            }}
+            QSlider::handle:horizontal:disabled {{
+                background: {theme['text_secondary']};
+            }}
+            QCheckBox::indicator:unchecked:hover, QRadioButton::indicator:unchecked:hover {{
+                border-color: {theme['accent']};
             }}
             QSlider::groove:horizontal {{
                 height: 6px;
