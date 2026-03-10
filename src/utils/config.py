@@ -39,6 +39,7 @@ DEFAULT_SETTINGS = {
     "left_scroll_enter_frames": 3,
     "left_scroll_exit_frames": 4,
     "failsafe_enabled": True,
+    "virtual_hand_mode": True,
     "theme": "light",
     "gesture_bindings": {
         "thumb_index": "left_drag",

@@ -77,11 +77,24 @@ class HandTrackerThread(QThread):
         self.scroll_step_limit = self.settings["scroll_step_limit"]
         self.left_scroll_enter_frames = self.settings["left_scroll_enter_frames"]
         self.left_scroll_exit_frames = self.settings["left_scroll_exit_frames"]
+        self.virtual_hand_mode = self.settings.get("virtual_hand_mode", True)
         # 强制禁用 Failsafe，忽略配置项以彻底解决闪退
         pyautogui.FAILSAFE = False
 
         self.last_gesture_state = {"left": "", "right": ""}
         self.last_gesture_emit_time = {"left": 0.0, "right": 0.0}
+
+        # EMA 平滑存储
+        self._prev_lms_active = None
+        self._prev_lms_helper = None
+
+        # 加载水墨背景
+        self.bg_image = cv2.imread("assets/bg.png")
+        if self.bg_image is None:
+            # 如果加载失败，创建一个简单的白色背景
+            self.bg_image = np.full((PROCESS_H, PROCESS_W, 3), 255, dtype=np.uint8)
+        else:
+            self.bg_image = cv2.resize(self.bg_image, (PROCESS_W, PROCESS_H))
 
     def _emit_gesture(self, side, name):
         now = time.time()
@@ -122,6 +135,117 @@ class HandTrackerThread(QThread):
 
     def set_failsafe_enabled(self, enabled):
         pyautogui.FAILSAFE = bool(enabled)
+
+    def _draw_ink_hand(self, frame, landmarks, frame_w, frame_h, side="active"):
+        """
+        Soft Ink Style Hand Renderer (Unified Shape)
+        目标：使手部看起来像一个统一的软水墨形状，指关节不可见，边缘柔柔且略微模糊。
+        """
+        if not landmarks:
+            return
+
+        # --- STEP 1: Landmark Smoothing (EMA) ---
+        curr_pts = np.array([[lm.x * frame_w, lm.y * frame_h] for lm in landmarks])
+        prev_attr = "_prev_lms_" + side
+        prev_pts = getattr(self, prev_attr, None)
+        
+        if prev_pts is None:
+            smoothed_pts = curr_pts
+        else:
+            smoothed_pts = 0.7 * curr_pts + 0.3 * prev_pts
+        setattr(self, prev_attr, smoothed_pts)
+        
+        # --- STEP 2: Create an empty ink mask ---
+        mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+
+        # --- STEP 3 & 4: Hand Size Calculation & Palm Base ---
+        # 提前计算手掌尺寸用于后续自适应缩放
+        # 使用 0 (腕部) 到 9 (中指根部) 的绝对像素距离作为缩放基准
+        # 假设标准距离下该长度约为 120 像素，将其标准化为比例系数
+        dx_palm_v = smoothed_pts[0][0] - smoothed_pts[9][0]
+        dy_palm_v = smoothed_pts[0][1] - smoothed_pts[9][1]
+        dist_v = math.sqrt(dx_palm_v*dx_palm_v + dy_palm_v*dy_palm_v)
+        
+        # 核心修复：hand_scale 必须反映手在画面中的像素大小。
+        # 之前可能除以了一个固定值但没能随距离线性缩小。我们将标准参考值设为 120 像素。
+        hand_scale = dist_v / 120.0 
+        
+        # 限制缩放范围，防止极近或极远时失效，但允许它变得很小（从 0.2 开始）
+        hand_scale = max(0.2, min(hand_scale, 2.5))
+
+        # 包含手腕点 (0) 和手掌关键点，确保侧面时手腕处有足够的填充
+        palm_indices = [0, 1, 2, 5, 9, 13, 17]
+        palm_pts = smoothed_pts[palm_indices].astype(np.int32)
+        hull = cv2.convexHull(palm_pts)
+        cv2.fillConvexPoly(mask, hull, 255)
+        
+        # 增强手掌根部：使用更丰满的椭圆，模拟圆角矩形的视觉感，并增加纵向延伸
+        wrist_pt_raw = smoothed_pts[0]
+        # 计算 2 到 17 的向量作为横向参考
+        v_h = smoothed_pts[17] - smoothed_pts[2]
+        v_h_unit = v_h / (np.linalg.norm(v_h) + 1e-6)
+        
+        # 在手腕位置绘制一个更丰满的椭圆
+        angle = np.degrees(np.arctan2(v_h_unit[1], v_h_unit[0]))
+        # 增加纵向（平行于手指方向）的半径从 15 增加到 22，横轴微增至 32，使边缘看起来更宽阔且不那么尖锐
+        axes = (int(32 * hand_scale), int(22 * hand_scale)) 
+        cv2.ellipse(mask, (int(wrist_pt_raw[0]), int(wrist_pt_raw[1])), axes, angle, 0, 360, 255, -1)
+        
+        # 为了让椭圆更像圆角矩形（边缘更平），我们在中心位置额外补一个小的填充块
+        cv2.polylines(mask, [hull], True, 255, thickness=max(1, int(12 * hand_scale)))
+
+        # --- STEP 5 & 6: Finger shapes (Soft brush path) ---
+        # 恢复手掌厚度为之前较饱满的状态
+        cv2.polylines(mask, [hull], True, 255, thickness=max(1, int(12 * hand_scale)))
+
+        # 优化手指形状：前后直径更一致，使其更像均匀的圆柱体，避免关节处过粗 (糖葫芦感)
+        # 将粗细进一步上调至 90% 左右（比之前的 80% 更饱满一点）
+        finger_configs = [
+            ([1, 2, 3, 4], 16 * hand_scale, 14 * hand_scale),   # 大拇指
+            ([5, 6, 7, 8], 14 * hand_scale, 12 * hand_scale),   # 食指
+            ([9, 10, 11, 12], 14 * hand_scale, 12 * hand_scale),# 中指
+            ([13, 14, 15, 16], 13 * hand_scale, 11 * hand_scale),# 无名指
+            ([17, 18, 19, 20], 12 * hand_scale, 10 * hand_scale) # 小指
+        ]
+
+        for indices, start_w, end_w in finger_configs:
+            for i in range(len(indices) - 1):
+                p1, p2 = smoothed_pts[indices[i]], smoothed_pts[indices[i+1]]
+                for t in np.linspace(0, 1, 12):
+                    x, y = int(p1[0]*(1-t)+p2[0]*t), int(p1[1]*(1-t)+p2[1]*t)
+                    r = int(start_w*(1-t)+end_w*t)
+                    # 确保半径最小为 1，且随距离缩小
+                    cv2.circle(mask, (x, y), max(1, int(r)), 255, -1)
+
+        # --- STEP 7: Render without blur ---
+        # 移除所有高斯模糊逻辑，直接使用 mask
+        mask_final = mask
+
+        # --- STEP 8 & 9: Render asymmetric cross-border outline (Hollow effect) ---
+        # 非对称描边：向内缩进约 2px，向外扩张约 1px
+        # 这种“内多外少”的布局能让手指保持苗条，同时外边缘提供足够的定位感
+        in_px = max(1, int(2 * hand_scale))
+        out_px = max(1, int(1 * hand_scale))
+        kernel = np.ones((3, 3), np.uint8)
+        
+        mask_dilated = cv2.dilate(mask_final, kernel, iterations=out_px)
+        mask_eroded = cv2.erode(mask_final, kernel, iterations=in_px)
+        
+        # 描边 = 扩张后的外壳 - 缩进后的内核
+        mixed_outline_mask = (mask_dilated.astype(np.float32) - mask_eroded.astype(np.float32)) / 255.0
+
+        f_img = frame.astype(np.float32)
+        
+        # 描边透明度 (0.6)，主体内部保持中空
+        outline_opacity = 0.6
+        blend_alpha = mixed_outline_mask * outline_opacity
+
+        alpha_3 = cv2.merge([blend_alpha, blend_alpha, blend_alpha])
+        # 渲染这种非对称轮廓，视觉重心会略微向内收缩，解决偏粗的观感
+        frame[:] = (f_img * (1.0 - alpha_3)).astype(np.uint8)
+
+        # 移除二次模糊逻辑，保持绝对清晰度
+        pass
 
     def _draw_hand(self, frame, landmarks, frame_w, frame_h, color, radius, thickness):
         if not landmarks:
@@ -220,10 +344,22 @@ class HandTrackerThread(QThread):
                     else:
                         helper_lms = results.hand_landmarks[idx]
 
-            if active_lms:
-                self._draw_hand(frame, active_lms, frame_w, frame_h, (30, 220, 255), 4, 2)
-            if helper_lms:
-                self._draw_hand(frame, helper_lms, frame_w, frame_h, (80, 180, 80), 3, 1)
+            # 渲染逻辑
+            if self.virtual_hand_mode:
+                # 使用虚拟背景和水墨手 (新的分层渲染方案)
+                display_frame = self.bg_image.copy()
+                if active_lms:
+                    self._draw_ink_hand(display_frame, active_lms, PROCESS_W, PROCESS_H, side="active")
+                if helper_lms:
+                    # 辅助手也使用同样的渲染逻辑
+                    self._draw_ink_hand(display_frame, helper_lms, PROCESS_W, PROCESS_H, side="helper")
+            else:
+                # 传统预览模式
+                display_frame = frame
+                if active_lms:
+                    self._draw_hand(display_frame, active_lms, frame_w, frame_h, (30, 220, 255), 4, 2)
+                if helper_lms:
+                    self._draw_hand(display_frame, helper_lms, frame_w, frame_h, (80, 180, 80), 3, 1)
 
             right_status = ""
             left_status = ""
@@ -262,8 +398,9 @@ class HandTrackerThread(QThread):
                     elapsed = now - reset_start_time
                     progress = min(elapsed / RESET_HOLD_TIME, 1.0)
                     cv2.ellipse(
-                        frame,
-                        (int(wrist.x * frame_w), int(wrist.y * frame_h)),
+                        display_frame,
+                        (int(wrist.x * (PROCESS_W if self.virtual_hand_mode else frame_w)), 
+                         int(wrist.y * (PROCESS_H if self.virtual_hand_mode else frame_h))),
                         (28, 28),
                         0,
                         0,
@@ -405,7 +542,7 @@ class HandTrackerThread(QThread):
             if left_status:
                 self._emit_gesture("left", left_status)
 
-            self.change_pixmap_signal.emit(frame)
+            self.change_pixmap_signal.emit(display_frame)
 
         if is_left_pressed:
             pyautogui.mouseUp()
