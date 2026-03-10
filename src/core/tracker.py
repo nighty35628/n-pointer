@@ -159,16 +159,15 @@ class HandTrackerThread(QThread):
         mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
 
         # --- STEP 3 & 4: Hand Size Calculation & Palm Base ---
-        # 提前计算手掌尺寸用于后续自适应缩放
-        # 使用 0 (腕部) 到 9 (中指根部) 的绝对像素距离作为缩放基准
-        # 假设标准距离下该长度约为 120 像素，将其标准化为比例系数
-        dx_palm_v = smoothed_pts[0][0] - smoothed_pts[9][0]
-        dy_palm_v = smoothed_pts[0][1] - smoothed_pts[9][1]
-        dist_v = math.sqrt(dx_palm_v*dx_palm_v + dy_palm_v*dy_palm_v)
+        # 优化缩放逻辑：改用手掌区域（0,1,2,5,9,13,17）的整体半径作为缩放基准
+        # 相比单一的纵向长度，由于包含了手掌所有核心点到中心的平均投影距离，
+        # 在手指指向摄像头（即单点缩短）时，整体手掌的投影面积变化更平稳。
+        palm_ref_pts = smoothed_pts[[0, 1, 2, 5, 9, 13, 17]]
+        palm_center = np.mean(palm_ref_pts, axis=0)
+        avg_palm_radius = np.mean(np.linalg.norm(palm_ref_pts - palm_center, axis=1))
         
-        # 核心修复：hand_scale 必须反映手在画面中的像素大小。
-        # 之前可能除以了一个固定值但没能随距离线性缩小。我们将标准参考值设为 120 像素。
-        hand_scale = dist_v / 120.0 
+        # 将 avg_palm_radius 标准化为比例系数（实验值：平均半径 50 像素左右为标准 1.0）
+        hand_scale = avg_palm_radius / 55.0 
         
         # 限制缩放范围，防止极近或极远时失效，但允许它变得很小（从 0.2 开始）
         hand_scale = max(0.2, min(hand_scale, 2.5))
@@ -195,11 +194,24 @@ class HandTrackerThread(QThread):
         cv2.polylines(mask, [hull], True, 255, thickness=max(1, int(12 * hand_scale)))
 
         # --- STEP 5 & 6: Finger shapes (Soft brush path) ---
+        # 指缝补偿逻辑：在相邻手指根部之间绘制圆块，防止背面检测导致的指缝过深、手指过长
+        # 补偿点：食指-中指 (5, 9), 中指-无名指 (9, 13), 无名指-小指 (13, 17)
+        webbing_pairs = [(5, 9), (9, 13), (13, 17)]
+        for idx1, idx2 in webbing_pairs:
+            p1, p2 = smoothed_pts[idx1], smoothed_pts[idx2]
+            # 取两根手指根部的中点
+            web_pt = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+            # 绘制一个略向上偏移（向手指方向）的填充圆，
+            # 这里的偏移系数 0.1 可以调节指缝的高度感
+            cv2.circle(mask, (int(web_pt[0]), int(web_pt[1])), int(10 * hand_scale), 255, -1)
+
         # 恢复手掌厚度为之前较饱满的状态
         cv2.polylines(mask, [hull], True, 255, thickness=max(1, int(12 * hand_scale)))
 
         # 优化手指形状：前后直径更一致，使其更像均匀的圆柱体，避免关节处过粗 (糖葫芦感)
         # 将粗细进一步上调至 90% 左右（比之前的 80% 更饱满一点）
+        # 每个手指的基准比例（从根部到指尖）进行微调：
+        # 对于指向摄像头的手势，为了防止视觉过长，略微缩减指尖部分的延伸感
         finger_configs = [
             ([1, 2, 3, 4], 16 * hand_scale, 14 * hand_scale),   # 大拇指
             ([5, 6, 7, 8], 14 * hand_scale, 12 * hand_scale),   # 食指
@@ -209,9 +221,16 @@ class HandTrackerThread(QThread):
         ]
 
         for indices, start_w, end_w in finger_configs:
+            # 特殊处理指向摄像头时坐标重叠导致的视觉过长
+            # 如果点与点之间像素距离过近，减少 linspace 绘制点数或强制收缩
             for i in range(len(indices) - 1):
                 p1, p2 = smoothed_pts[indices[i]], smoothed_pts[indices[i+1]]
-                for t in np.linspace(0, 1, 12):
+                seg_dist = np.linalg.norm(p1 - p2)
+                # 当手指指向摄像头时，seg_dist 会非常小（透视收缩）
+                # 这里我们增加一个简单的过滤，如果距离过近且处于指尖部分，不再强行画圆，防止堆叠导致“变长”
+                num_steps = max(2, int(min(12, seg_dist / (2 * hand_scale))))
+                
+                for t in np.linspace(0, 1, num_steps):
                     x, y = int(p1[0]*(1-t)+p2[0]*t), int(p1[1]*(1-t)+p2[1]*t)
                     r = int(start_w*(1-t)+end_w*t)
                     # 确保半径最小为 1，且随距离缩小

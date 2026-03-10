@@ -755,21 +755,29 @@ class ControlWindow(QMainWindow):
         self._update_sidebar_text()
 
     def _preview_target_size(self):
+        # 允许基础尺寸随窗口缩放，不再限制在固定的 PREVIEW_BASE_W
         available_w = max(320, self.preview_holder.width() - 8)
         available_h = max(180, self.preview_holder.height() - 8)
-        target_w = min(PREVIEW_BASE_W, available_w)
+        
+        # 尝试以 16:9 比例填充可用区域的最大宽度
+        target_w = available_w
         target_h = int(target_w / PREVIEW_RATIO)
+        
+        # 如果计算出的高度超出了可用高度，则以高度为基准反推宽度
         if target_h > available_h:
             target_h = available_h
             target_w = int(target_h * PREVIEW_RATIO)
+            
         return QSize(max(320, target_w), max(180, target_h))
 
     def _cover_pixmap(self, pixmap, target_size):
+        # 使用更为平滑且比例正确的缩放方式
         scaled = pixmap.scaled(
             target_size,
             Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.SmoothTransformation,
         )
+        # 居中裁剪（如果比例不完全匹配）
         x = max(0, (scaled.width() - target_size.width()) // 2)
         y = max(0, (scaled.height() - target_size.height()) // 2)
         return scaled.copy(x, y, target_size.width(), target_size.height())
