@@ -66,7 +66,7 @@ GESTURE_ACTION_OPTIONS = [
 
 GESTURE_DESCRIPTIONS = [
     "右手剑指：进入并保持移动状态",
-    "右手大拇指伸出：退出移动状态",
+    "右手伸出大拇指：暂停移动（收回后恢复）",
     "左手食指中指并拢并向上/向下指：控制滚轮",
     "可配置手势 1：右手大拇指 + 食指捏合",
     "可配置手势 2：右手大拇指 + 中指捏合",
@@ -488,12 +488,13 @@ class HandTrackerThread(QThread):
                     if is_sword:
                         is_move_mode, move_mode_hold_until = True, time.time() + HAND_LOSS_HOLD_TIME
                         self._emit_gesture("进入移动")
-                    elif is_thumb_ext:
+                    
+                    if is_thumb_ext:
                         thumb_cancel_frames += 1
-                        if thumb_cancel_frames >= THUMB_CANCEL_FRAMES: is_move_mode = False; self._emit_gesture("停止移动")
-                    else: thumb_cancel_frames = 0
+                    else: 
+                        thumb_cancel_frames = 0
 
-                    if is_move_mode:
+                    if is_move_mode and not is_thumb_ext:
                         last_active_index_point = (index_tip.x, index_tip.y)
                         move_mode_hold_until = time.time() + HAND_LOSS_HOLD_TIME
                         tx = map_pointer_axis(index_tip.x, EDGE_PAD_X, EDGE_CURVE, self.sens_x) * self.screen_w
@@ -501,6 +502,9 @@ class HandTrackerThread(QThread):
                         smooth_x += (tx - smooth_x) / self.smoothing
                         smooth_y += (ty - smooth_y) / self.smoothing
                         pyautogui.moveTo(int(smooth_x), int(smooth_y), _pause=False)
+                    elif is_move_mode and is_thumb_ext:
+                        if thumb_cancel_frames >= THUMB_CANCEL_FRAMES:
+                            self._emit_gesture("暂停移动")
 
                 # 4. 点击控制
                 p_l = get_dist_p(thumb_tip, index_tip) < PINCH_THRESHOLD

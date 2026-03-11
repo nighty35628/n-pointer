@@ -20,6 +20,8 @@ from src.utils.config import (
     SPREAD_THRESHOLD,
     STILL_FRAMES_REQ,
     SWORD_TOUCH_THRESHOLD,
+    THUMB_OUT_INDEX_DIST,
+    THUMB_OUT_X_DELTA,
     compute_scroll_step,
     ensure_model_file,
     get_dist_p,
@@ -403,6 +405,14 @@ class HandTrackerThread(QThread):
                 tips_to_wrist = [get_dist_p(wrist, point) for point in [thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]]
                 is_spread = all(distance > SPREAD_THRESHOLD for distance in tips_to_wrist) and is_back_facing
                 is_sword = get_dist_p(index_tip, middle_tip) < SWORD_TOUCH_THRESHOLD
+                
+                # 大拇指伸出检测 logic
+                if self.target_hand == "Right":
+                    thumb_out_x = thumb_tip.x < hand[2].x - THUMB_OUT_X_DELTA
+                else:
+                    thumb_out_x = thumb_tip.x > hand[2].x + THUMB_OUT_X_DELTA
+                is_thumb_ext = thumb_out_x and get_dist_p(thumb_tip, index_tip) > THUMB_OUT_INDEX_DIST
+
                 is_pinch_left = get_dist_p(thumb_tip, index_tip) < PINCH_THRESHOLD
                 is_pinch_right = get_dist_p(thumb_tip, middle_tip) < PINCH_THRESHOLD
 
@@ -444,19 +454,25 @@ class HandTrackerThread(QThread):
 
                     if is_sword:
                         move_cooldown = 15
-                        pos_history.append((index_tip.x, index_tip.y))
-                        if len(pos_history) > STILL_FRAMES_REQ:
-                            pos_history.pop(0)
-                        if len(pos_history) == STILL_FRAMES_REQ:
-                            xs = [point[0] for point in pos_history]
-                            ys = [point[1] for point in pos_history]
-                            spread = max(max(xs) - min(xs), max(ys) - min(ys))
-                            if spread < self.still_threshold:
-                                is_cursor_locked = True
-                            elif spread > self.still_threshold * 4.0:
-                                is_cursor_locked = False
+                        # 如果大拇指伸出，则锁定光标不移动
+                        if is_thumb_ext:
+                            is_cursor_locked = True
+                            right_status = "Pause"
+                        else:
+                            pos_history.append((index_tip.x, index_tip.y))
+                            if len(pos_history) > STILL_FRAMES_REQ:
+                                pos_history.pop(0)
+                            if len(pos_history) == STILL_FRAMES_REQ:
+                                xs = [point[0] for point in pos_history]
+                                ys = [point[1] for point in pos_history]
+                                spread = max(max(xs) - min(xs), max(ys) - min(ys))
+                                if spread < self.still_threshold:
+                                    is_cursor_locked = True
+                                elif spread > self.still_threshold * 4.0:
+                                    is_cursor_locked = False
 
-                        right_status = "Move locked" if is_cursor_locked else "Moving"
+                            right_status = "Move locked" if is_cursor_locked else "Moving"
+
                         if not is_cursor_locked:
                             rx1, ry1 = MARGIN_X, MARGIN_Y
                             rx2, ry2 = frame_w - MARGIN_X, frame_h - MARGIN_Y
