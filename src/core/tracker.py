@@ -76,6 +76,8 @@ class HandTrackerThread(QThread):
         self.scroll_interval_ms = self.settings["scroll_interval_ms"]
         self.scroll_deadzone = self.settings["scroll_deadzone"]
         self.scroll_scale = self.settings["scroll_scale"]
+        self.ctrl_tip_window = 1
+        self.ctrl_tip_max_jump = 0.15
         self.scroll_step_limit = self.settings["scroll_step_limit"]
         self.left_scroll_enter_frames = self.settings["left_scroll_enter_frames"]
         self.left_scroll_exit_frames = self.settings["left_scroll_exit_frames"]
@@ -94,9 +96,14 @@ class HandTrackerThread(QThread):
         self.bg_image = cv2.imread("assets/bg.png")
         if self.bg_image is None:
             # 如果加载失败，创建一个简单的白色背景
-            self.bg_image = np.full((PROCESS_H, PROCESS_W, 3), 255, dtype=np.uint8)
+            self.display_w = PROCESS_W
+            self.display_h = round(PROCESS_W * 9 / 16)
+            self.bg_image = np.full((self.display_h, self.display_w, 3), 255, dtype=np.uint8)
         else:
-            self.bg_image = cv2.resize(self.bg_image, (PROCESS_W, PROCESS_H))
+            bg_h, bg_w = self.bg_image.shape[:2]
+            self.display_w = PROCESS_W
+            self.display_h = max(1, round(self.display_w * bg_h / bg_w))
+            self.bg_image = cv2.resize(self.bg_image, (self.display_w, self.display_h), interpolation=cv2.INTER_AREA)
 
     def _emit_gesture(self, side, name):
         now = time.time()
@@ -196,16 +203,6 @@ class HandTrackerThread(QThread):
         cv2.polylines(mask, [hull], True, 255, thickness=max(1, int(12 * hand_scale)))
 
         # --- STEP 5 & 6: Finger shapes (Soft brush path) ---
-        # 指缝补偿逻辑：在相邻手指根部之间绘制圆块，防止背面检测导致的指缝过深、手指过长
-        # 补偿点：食指-中指 (5, 9), 中指-无名指 (9, 13), 无名指-小指 (13, 17)
-        webbing_pairs = [(5, 9), (9, 13), (13, 17)]
-        for idx1, idx2 in webbing_pairs:
-            p1, p2 = smoothed_pts[idx1], smoothed_pts[idx2]
-            # 取两根手指根部的中点
-            web_pt = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
-            # 绘制一个略向上偏移（向手指方向）的填充圆，
-            # 这里的偏移系数 0.1 可以调节指缝的高度感
-            cv2.circle(mask, (int(web_pt[0]), int(web_pt[1])), int(10 * hand_scale), 255, -1)
 
         # 恢复手掌厚度为之前较饱满的状态
         cv2.polylines(mask, [hull], True, 255, thickness=max(1, int(12 * hand_scale)))
@@ -340,6 +337,18 @@ class HandTrackerThread(QThread):
         last_move_time = 0.0
         last_scroll_time = 0.0
 
+        is_move_mode = False
+        thumb_lock_mode = False
+        thumb_exit_frames = 0
+        THUMB_EXIT_FRAMES = 6
+        thumb_release_frames = 0
+        THUMB_RELEASE_FRAMES = 1
+        last_active_lms = None
+        active_lms_lost_frames = 0
+        ACTIVE_LMS_HOLD_FRAMES = 8
+        ctrl_tip_hist = []
+        prev_ctrl_tip = None
+
         while self.running and cap.isOpened():
             success, frame = cap.read()
             if not success:
@@ -364,16 +373,31 @@ class HandTrackerThread(QThread):
                         active_lms = results.hand_landmarks[idx]
                     else:
                         helper_lms = results.hand_landmarks[idx]
+            
+            # --- 核心改进：主控手在移动模式下的身份保持 ---
+            # 如果处于移动模式（还没伸大拇指退出），但当前没识别到目标主控手，
+            # 那么就在剩下的手里强行“指认”一只作为主控手（即使分类错了也没关系），保证移动信号不断。
+            if is_move_mode and active_lms is None and helper_lms is not None:
+                active_lms = helper_lms
+                helper_lms = None
+
+            # 侧面角度时检测会短时丢帧：移动模式下使用短时缓存，避免虚拟手和状态抽搐。
+            if active_lms is not None:
+                last_active_lms = active_lms
+                active_lms_lost_frames = 0
+            elif is_move_mode and last_active_lms is not None and active_lms_lost_frames < ACTIVE_LMS_HOLD_FRAMES:
+                active_lms = last_active_lms
+                active_lms_lost_frames += 1
 
             # 渲染逻辑
             if self.virtual_hand_mode:
                 # 使用虚拟背景和水墨手 (新的分层渲染方案)
                 display_frame = self.bg_image.copy()
                 if active_lms:
-                    self._draw_ink_hand(display_frame, active_lms, PROCESS_W, PROCESS_H, side="active")
+                    self._draw_ink_hand(display_frame, active_lms, self.display_w, self.display_h, side="active")
                 if helper_lms:
                     # 辅助手也使用同样的渲染逻辑
-                    self._draw_ink_hand(display_frame, helper_lms, PROCESS_W, PROCESS_H, side="helper")
+                    self._draw_ink_hand(display_frame, helper_lms, self.display_w, self.display_h, side="helper")
             else:
                 # 传统预览模式
                 display_frame = frame
@@ -428,8 +452,8 @@ class HandTrackerThread(QThread):
                     progress = min(elapsed / RESET_HOLD_TIME, 1.0)
                     cv2.ellipse(
                         display_frame,
-                        (int(wrist.x * (PROCESS_W if self.virtual_hand_mode else frame_w)), 
-                         int(wrist.y * (PROCESS_H if self.virtual_hand_mode else frame_h))),
+                        (int(wrist.x * (self.display_w if self.virtual_hand_mode else frame_w)),
+                         int(wrist.y * (self.display_h if self.virtual_hand_mode else frame_h))),
                         (28, 28),
                         0,
                         0,
@@ -452,33 +476,74 @@ class HandTrackerThread(QThread):
                     else:
                         reset_start_time = 0.0
 
-                    if is_sword:
-                        move_cooldown = 15
-                        # 如果大拇指伸出，则锁定光标不移动
-                        if is_thumb_ext:
-                            is_cursor_locked = True
-                            right_status = "Pause"
-                        else:
-                            pos_history.append((index_tip.x, index_tip.y))
-                            if len(pos_history) > STILL_FRAMES_REQ:
-                                pos_history.pop(0)
-                            if len(pos_history) == STILL_FRAMES_REQ:
-                                xs = [point[0] for point in pos_history]
-                                ys = [point[1] for point in pos_history]
-                                spread = max(max(xs) - min(xs), max(ys) - min(ys))
-                                if spread < self.still_threshold:
-                                    is_cursor_locked = True
-                                elif spread > self.still_threshold * 4.0:
-                                    is_cursor_locked = False
+                    if is_thumb_ext:
+                        thumb_exit_frames += 1
+                        thumb_release_frames = 0
+                    else:
+                        thumb_exit_frames = 0
+                        if thumb_lock_mode:
+                            thumb_release_frames += 1
 
-                            right_status = "Move locked" if is_cursor_locked else "Moving"
+                    # 拇指锁定防抖：连续多帧成立才进入锁定，避免侧面抖动时误触发
+                    if thumb_exit_frames >= THUMB_EXIT_FRAMES:
+                        thumb_lock_mode = True
+                        is_move_mode = False
+                        is_cursor_locked = False
+                        pos_history.clear()
+                        ctrl_tip_hist.clear()
+                        prev_ctrl_tip = None
+                        right_status = "Pause"
+
+                    # 锁定闩锁：进入后不会因为手继续移动而立刻恢复，需连续多帧收回拇指才解锁
+                    if thumb_lock_mode:
+                        right_status = "Pause"
+                        is_move_mode = False
+                        if is_left_pressed:
+                            pyautogui.mouseUp()
+                            is_left_pressed = False
+                        if thumb_release_frames >= THUMB_RELEASE_FRAMES:
+                            thumb_lock_mode = False
+                            thumb_release_frames = 0
+                    elif is_sword:
+                        is_move_mode = True
+                        move_cooldown = 15
+
+                    if is_move_mode:
+                        # 核心修改：一旦在移动模式中，除非检测到 thumb_out 退出，
+                        # 否则无论当前是否满足 is_sword 条件（比如手转到了侧面识别不到剑指了），
+                        # 只要 active_lms 还在，就强制执行移动逻辑并显示 Moving。
+                        # 移动模式下禁用静止锁定，避免侧面 landmarks 抖动造成停走抽搐
+                        is_cursor_locked = False
+
+                        right_status = "Moving" # 强制显示为正在移动
 
                         if not is_cursor_locked:
+                            raw_tip_x = float(index_tip.x)
+                            raw_tip_y = float(index_tip.y)
+
+                            if prev_ctrl_tip is None:
+                                filtered_tip_x, filtered_tip_y = raw_tip_x, raw_tip_y
+                            else:
+                                jump = math.hypot(raw_tip_x - prev_ctrl_tip[0], raw_tip_y - prev_ctrl_tip[1])
+                                if jump > self.ctrl_tip_max_jump:
+                                    # 抑制侧面角度下的双模态跳点，避免鼠标在两个位置来回抽搐
+                                    filtered_tip_x = prev_ctrl_tip[0] + (raw_tip_x - prev_ctrl_tip[0]) * 0.3
+                                    filtered_tip_y = prev_ctrl_tip[1] + (raw_tip_y - prev_ctrl_tip[1]) * 0.3
+                                else:
+                                    filtered_tip_x, filtered_tip_y = raw_tip_x, raw_tip_y
+
+                            ctrl_tip_hist.append((filtered_tip_x, filtered_tip_y))
+                            if len(ctrl_tip_hist) > self.ctrl_tip_window:
+                                ctrl_tip_hist.pop(0)
+
+                            median_x = float(np.median([p[0] for p in ctrl_tip_hist]))
+                            median_y = float(np.median([p[1] for p in ctrl_tip_hist]))
+                            prev_ctrl_tip = (median_x, median_y)
+
                             rx1, ry1 = MARGIN_X, MARGIN_Y
                             rx2, ry2 = frame_w - MARGIN_X, frame_h - MARGIN_Y
-                            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (255, 220, 80), 1)
-                            tx = np.interp(index_tip.x * frame_w, (rx1, rx2), (0, self.screen_w))
-                            ty = np.interp(index_tip.y * frame_h, (ry1, ry2), (0, self.screen_h))
+                            tx = np.interp(median_x * frame_w, (rx1, rx2), (0, self.screen_w))
+                            ty = np.interp(median_y * frame_h, (ry1, ry2), (0, self.screen_h))
                             cx, cy = self.screen_w / 2, self.screen_h / 2
                             tx = cx + (tx - cx) * self.sens_x
                             ty = cy + (ty - cy) * self.sens_y
@@ -491,6 +556,8 @@ class HandTrackerThread(QThread):
                                     pyautogui.moveTo(final_x, final_y, _pause=False)
                                     last_move_time = now
                     else:
+                        ctrl_tip_hist.clear()
+                        prev_ctrl_tip = None
                         pos_history.clear()
                         is_cursor_locked = False
                         if move_cooldown > 0:
@@ -519,12 +586,22 @@ class HandTrackerThread(QThread):
 
                 cv2.circle(frame, (int(index_tip.x * frame_w), int(index_tip.y * frame_h)), 9, (40, 40, 220), -1)
             else:
-                pos_history.clear()
-                is_cursor_locked = False
-                reset_start_time = 0.0
-                if is_left_pressed:
-                    pyautogui.mouseUp()
-                    is_left_pressed = False
+                if thumb_lock_mode:
+                    right_status = "Pause"
+                elif is_move_mode:
+                    right_status = "Moving" # 即使没识别到手，也保持移动状态文字
+                else:
+                    thumb_exit_frames = 0
+                    thumb_release_frames = 0
+                    active_lms_lost_frames = 0
+                    ctrl_tip_hist.clear()
+                    prev_ctrl_tip = None
+                    pos_history.clear()
+                    is_cursor_locked = False
+                    reset_start_time = 0.0
+                    if is_left_pressed:
+                        pyautogui.mouseUp()
+                        is_left_pressed = False
 
             if helper_lms:
                 helper_index_tip = helper_lms[8]

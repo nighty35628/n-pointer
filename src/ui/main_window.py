@@ -234,6 +234,7 @@ class ControlWindow(QMainWindow):
         self.compact_mode = False
         self.is_loading_ui = True
         self.tracker = None
+        self._preview_refresh_pending = True
         self.default_preview = self._load_default_preview()
         self.current_preview = None
 
@@ -795,6 +796,12 @@ class ControlWindow(QMainWindow):
         self._set_preview_pixmap(self.default_preview)
         self.gesture_label_l.setText(self._t("waiting"))
         self.gesture_label_r.setText(self._t("waiting"))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._preview_refresh_pending:
+            self._preview_refresh_pending = False
+            QTimer.singleShot(0, lambda: self._set_preview_pixmap(self.current_preview or self.default_preview))
 
     def on_gesture_detected(self, side, name):
         key = STATUS_MAP.get(name, "st_wait")
